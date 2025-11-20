@@ -10,6 +10,7 @@ Required environment variables:
 Optional environment variables:
   - VCToolsInstallDir
   - GITHUB_WORKSPACE
+  - THEROCK_BACKGROUND_BUILD_JOBS (override automatic calculation)
 """
 
 import argparse
@@ -34,13 +35,104 @@ build_dir = os.getenv("BUILD_DIR")
 vctools_install_dir = os.getenv("VCToolsInstallDir")
 github_workspace = os.getenv("GITHUB_WORKSPACE")
 
+
+def calculate_windows_background_jobs():
+    """
+    Calculate optimal number of background build jobs for Windows based on
+    system resources (memory and CPU cores).
+
+    Strategy:
+    1. Memory-based limit: Estimate each background job needs ~6GB of RAM
+    2. CPU-based limit: Similar to Linux (cores / 20, minimum 2)
+    3. Return the minimum of both to avoid resource exhaustion
+    4. Respect THEROCK_BACKGROUND_BUILD_JOBS environment variable override
+
+    Returns:
+        int: Number of background build jobs to use
+    """
+    # Check for environment variable override first
+    env_override = os.getenv("THEROCK_BACKGROUND_BUILD_JOBS")
+    if env_override:
+        try:
+            jobs = int(env_override)
+            if jobs > 0:
+                logging.info(
+                    f"Using THEROCK_BACKGROUND_BUILD_JOBS from environment: {jobs}"
+                )
+                return jobs
+        except ValueError:
+            logging.warning(
+                f"Invalid THEROCK_BACKGROUND_BUILD_JOBS value: {env_override}, "
+                "falling back to automatic calculation"
+            )
+
+    try:
+        import psutil
+
+        # Get system memory in GB
+        total_memory_gb = psutil.virtual_memory().total / (1024**3)
+
+        # Get CPU core count
+        cpu_count = psutil.cpu_count(logical=False) or psutil.cpu_count()
+
+        # Memory-based calculation
+        # Conservative estimate: each background job can use 6GB peak memory
+        # Reserve 8GB for the system and foreground builds
+        GB_PER_BACKGROUND_JOB = 6
+        RESERVED_MEMORY_GB = 8
+        available_for_background = max(0, total_memory_gb - RESERVED_MEMORY_GB)
+        memory_based_jobs = int(available_for_background / GB_PER_BACKGROUND_JOB)
+
+        # CPU-based calculation (similar to Linux logic in therock_job_pools.cmake)
+        # Use cores / 20, with a minimum of 2
+        cpu_based_jobs = max(2, cpu_count // 20)
+
+        # Take the minimum to avoid overwhelming either resource
+        # But enforce absolute minimum of 2 and maximum of 8 for safety
+        calculated_jobs = max(2, min(8, min(memory_based_jobs, cpu_based_jobs)))
+
+        logging.info(
+            f"Windows background jobs calculation:\n"
+            f"  Total Memory: {total_memory_gb:.1f} GB\n"
+            f"  CPU Cores: {cpu_count}\n"
+            f"  Memory-based limit: {memory_based_jobs} jobs "
+            f"({available_for_background:.1f} GB / {GB_PER_BACKGROUND_JOB} GB per job)\n"
+            f"  CPU-based limit: {cpu_based_jobs} jobs "
+            f"({cpu_count} cores / 20)\n"
+            f"  Final calculated: {calculated_jobs} background jobs"
+        )
+
+        return calculated_jobs
+
+    except ImportError:
+        logging.warning(
+            "psutil not available, falling back to default of 4 background jobs. "
+            "Install psutil for dynamic resource-based calculation."
+        )
+        return 4
+    except Exception as e:
+        logging.warning(
+            f"Error calculating background jobs: {e}, "
+            "falling back to default of 4"
+        )
+        return 4
+
+
+def get_platform_options():
+    """Get platform-specific CMake options."""
+    if PLATFORM == "windows":
+        background_jobs = calculate_windows_background_jobs()
+        return [
+            f"-DCMAKE_C_COMPILER={vctools_install_dir}/bin/Hostx64/x64/cl.exe",
+            f"-DCMAKE_CXX_COMPILER={vctools_install_dir}/bin/Hostx64/x64/cl.exe",
+            f"-DCMAKE_LINKER={vctools_install_dir}/bin/Hostx64/x64/link.exe",
+            f"-DTHEROCK_BACKGROUND_BUILD_JOBS={background_jobs}",
+        ]
+    return []
+
+
 platform_options = {
-    "windows": [
-        f"-DCMAKE_C_COMPILER={vctools_install_dir}/bin/Hostx64/x64/cl.exe",
-        f"-DCMAKE_CXX_COMPILER={vctools_install_dir}/bin/Hostx64/x64/cl.exe",
-        f"-DCMAKE_LINKER={vctools_install_dir}/bin/Hostx64/x64/link.exe",
-        "-DTHEROCK_BACKGROUND_BUILD_JOBS=4",
-    ],
+    "windows": get_platform_options() if PLATFORM == "windows" else [],
 }
 
 
