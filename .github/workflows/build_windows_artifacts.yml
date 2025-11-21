@@ -150,7 +150,7 @@ jobs:
           python3 build_tools/github_actions/build_configure.py
 
       - name: Build therock-archives and therock-dist
-        run: cmake --build "${{ env.BUILD_DIR }}" --target therock-archives therock-dist -- -k 0
+        run: cmake --build "${{ env.BUILD_DIR }}" --target therock-archives therock-dist -- -k 0 -d stats
 
       - name: Report
         if: ${{ !cancelled() }}
