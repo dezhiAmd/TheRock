@@ -10,6 +10,7 @@ Required environment variables:
 Optional environment variables:
   - VCToolsInstallDir
   - GITHUB_WORKSPACE
+  - THEROCK_BACKGROUND_BUILD_JOBS_CALCULATED (set automatically by this script for debugging)
 """
 
 import argparse
@@ -19,6 +20,8 @@ from pathlib import Path
 import platform
 import shlex
 import subprocess
+import multiprocessing
+import psutil
 
 logging.basicConfig(level=logging.INFO)
 THIS_SCRIPT_DIR = Path(__file__).resolve().parent
@@ -34,12 +37,77 @@ build_dir = os.getenv("BUILD_DIR")
 vctools_install_dir = os.getenv("VCToolsInstallDir")
 github_workspace = os.getenv("GITHUB_WORKSPACE")
 
+
+def calculate_background_build_jobs():
+    """
+    Calculate optimal number of background build jobs based on CPU cores and available memory.
+    
+    Strategy:
+    1. Base calculation on CPU cores (similar to Linux: cores / 20, min 2)
+    2. Constrain by available memory (assume each job needs ~2GB)
+    3. Cache result in environment variable for debugging
+    
+    Returns:
+        int: Number of background build jobs
+    """
+    # Check if already calculated and cached
+    cached_jobs = os.getenv("THEROCK_BACKGROUND_BUILD_JOBS_CALCULATED")
+    if cached_jobs:
+        jobs = int(cached_jobs)
+        logging.info(f"Using cached THEROCK_BACKGROUND_BUILD_JOBS: {jobs}")
+        return jobs
+    
+    # Get CPU count
+    cpu_count = multiprocessing.cpu_count()
+    
+    # Get available memory in GB
+    memory_info = psutil.virtual_memory()
+    total_memory_gb = memory_info.total / (1024 ** 3)
+    available_memory_gb = memory_info.available / (1024 ** 3)
+    
+    # Calculate based on CPU cores (matching Linux logic: cores / 20, min 2)
+    jobs_by_cpu = max(2, cpu_count // 20)
+    
+    # Calculate based on memory (assume ~2GB per background job for safety)
+    # Use available memory to be conservative
+    memory_per_job_gb = 2.0
+    jobs_by_memory = max(2, int(available_memory_gb / memory_per_job_gb))
+    
+    # Take the minimum of the two constraints
+    background_jobs = min(jobs_by_cpu, jobs_by_memory)
+    
+    # Additional safety: cap at 8 to avoid overwhelming the system
+    background_jobs = min(background_jobs, 8)
+    
+    # Ensure minimum of 2
+    background_jobs = max(2, background_jobs)
+    
+    # Cache the result in environment variable for debugging
+    os.environ["THEROCK_BACKGROUND_BUILD_JOBS_CALCULATED"] = str(background_jobs)
+    
+    # Log detailed information for debugging
+    logging.info("=" * 60)
+    logging.info("Background Build Jobs Calculation:")
+    logging.info(f"  CPU cores: {cpu_count}")
+    logging.info(f"  Total memory: {total_memory_gb:.2f} GB")
+    logging.info(f"  Available memory: {available_memory_gb:.2f} GB")
+    logging.info(f"  Jobs by CPU (cores/20): {jobs_by_cpu}")
+    logging.info(f"  Jobs by memory (available/{memory_per_job_gb}GB): {jobs_by_memory}")
+    logging.info(f"  Final calculated jobs: {background_jobs}")
+    logging.info("=" * 60)
+    
+    return background_jobs
+
+
+# Calculate Windows background build jobs dynamically
+windows_background_jobs = calculate_background_build_jobs() if PLATFORM == "windows" else 4
+
 platform_options = {
     "windows": [
         f"-DCMAKE_C_COMPILER={vctools_install_dir}/bin/Hostx64/x64/cl.exe",
         f"-DCMAKE_CXX_COMPILER={vctools_install_dir}/bin/Hostx64/x64/cl.exe",
         f"-DCMAKE_LINKER={vctools_install_dir}/bin/Hostx64/x64/link.exe",
-        "-DTHEROCK_BACKGROUND_BUILD_JOBS=4",
+        f"-DTHEROCK_BACKGROUND_BUILD_JOBS={windows_background_jobs}",
     ],
 }
 
