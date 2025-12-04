@@ -43,7 +43,7 @@ def calculate_background_build_jobs():
     Calculate optimal number of background build jobs based on CPU cores and available memory.
     
     Strategy:
-    1. Base calculation on CPU cores (cores - 1, min 2)
+    1. Base calculation on CPU cores (cores - 1, min 4)
     2. Constrain by available memory (assume each job needs ~2GB)
     3. Cache result in environment variable for debugging
     
@@ -65,13 +65,13 @@ def calculate_background_build_jobs():
     total_memory_gb = memory_info.total / (1024 ** 3)
     available_memory_gb = memory_info.available / (1024 ** 3)
     
-    # Calculate based on CPU cores (cores - 1, min 2)
-    jobs_by_cpu = max(2, cpu_count-1)
+    # Calculate based on CPU cores (cores - 1, min 4)
+    jobs_by_cpu = max(4, cpu_count-1)
     
     # Calculate based on memory (assume ~2GB per background job for safety)
     # Use available memory to be conservative
     memory_per_job_gb = 2.0
-    jobs_by_memory = max(2, int(available_memory_gb / memory_per_job_gb))
+    jobs_by_memory = max(4, int(available_memory_gb / memory_per_job_gb))
     
     # Take the minimum of the two constraints
     background_jobs = min(jobs_by_cpu, jobs_by_memory)
@@ -79,8 +79,8 @@ def calculate_background_build_jobs():
     # Additional safety: cap at 16 to avoid overwhelming the system
     background_jobs = min(background_jobs, 16)
     
-    # Ensure minimum of 2
-    background_jobs = max(2, background_jobs)
+    # Ensure minimum of 4
+    background_jobs = max(4, background_jobs)
     
     # Cache the result in environment variable for debugging
     os.environ["THEROCK_BACKGROUND_BUILD_JOBS_CALCULATED"] = str(background_jobs)

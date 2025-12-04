@@ -29,18 +29,18 @@ class BuildConfigureTest(unittest.TestCase):
     @patch('build_configure.multiprocessing')
     def test_calculate_background_jobs_cpu_constrained(self, mock_multiprocessing, mock_psutil):
         """Test when CPU is the limiting factor (low core count, high memory)"""
-        # Mock 4 CPU cores and 128 GB memory
-        mock_multiprocessing.cpu_count.return_value = 4
+        # Mock 5 CPU cores and 128 GB memory
+        mock_multiprocessing.cpu_count.return_value = 5
         mock_memory = MagicMock()
         mock_memory.total = 128 * (1024 ** 3)  # 128 GB
         mock_memory.available = 100 * (1024 ** 3)  # 100 GB available
         mock_psutil.virtual_memory.return_value = mock_memory
 
-        # Expected: max(2, 4 - 1) = 3 (CPU constraint)
+        # Expected: max(4, 5 - 1) = 4 (CPU constraint with minimum enforced)
         # Memory would allow: 100 / 2 = 50
-        # Min of both: 3
+        # Min of both: 4
         result = calculate_background_build_jobs()
-        self.assertEqual(result, 3)
+        self.assertEqual(result, 4)
 
     @patch('build_configure.psutil')
     @patch('build_configure.multiprocessing')
@@ -50,14 +50,14 @@ class BuildConfigureTest(unittest.TestCase):
         mock_multiprocessing.cpu_count.return_value = 20
         mock_memory = MagicMock()
         mock_memory.total = 16 * (1024 ** 3)  # 16 GB
-        mock_memory.available = 10 * (1024 ** 3)  # 10 GB available
+        mock_memory.available = 12 * (1024 ** 3)  # 12 GB available
         mock_psutil.virtual_memory.return_value = mock_memory
 
-        # Expected: max(2, 20 - 1) = 19 (CPU would allow)
-        # Memory allows: 10 / 2 = 5 (Memory constraint)
-        # Min of both: 5
+        # Expected: max(4, 20 - 1) = 19 (CPU would allow)
+        # Memory allows: max(4, 12 / 2) = 6 (Memory constraint)
+        # Min of both: 6
         result = calculate_background_build_jobs()
-        self.assertEqual(result, 5)
+        self.assertEqual(result, 6)
 
     @patch('build_configure.psutil')
     @patch('build_configure.multiprocessing')
@@ -78,8 +78,8 @@ class BuildConfigureTest(unittest.TestCase):
 
     @patch('build_configure.psutil')
     @patch('build_configure.multiprocessing')
-    def test_calculate_background_jobs_minimum_2(self, mock_multiprocessing, mock_psutil):
-        """Test that result is at least 2 even with very low resources"""
+    def test_calculate_background_jobs_minimum_4(self, mock_multiprocessing, mock_psutil):
+        """Test that result is at least 4 even with very low resources"""
         # Mock 2 CPU cores and 2 GB memory
         mock_multiprocessing.cpu_count.return_value = 2
         mock_memory = MagicMock()
@@ -87,12 +87,12 @@ class BuildConfigureTest(unittest.TestCase):
         mock_memory.available = 1 * (1024 ** 3)  # 1 GB available
         mock_psutil.virtual_memory.return_value = mock_memory
 
-        # Expected: max(2, 2 - 1) = 2 (CPU minimum)
-        # Memory allows: 1 / 2 = 0 -> max(2, 0) = 2 (Memory minimum)
-        # Min of both: 2
-        # Final: 2 (minimum enforced)
+        # Expected: max(4, 2 - 1) = 4 (CPU minimum enforced)
+        # Memory allows: max(4, 1 / 2) = 4 (Memory minimum enforced)
+        # Min of both: 4
+        # Final: 4 (minimum enforced)
         result = calculate_background_build_jobs()
-        self.assertEqual(result, 2)
+        self.assertEqual(result, 4)
 
     @patch('build_configure.psutil')
     @patch('build_configure.multiprocessing')
