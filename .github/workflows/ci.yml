@@ -75,7 +75,12 @@ jobs:
     if: >-
       ${{
         needs.setup.outputs.linux_variants != '[]' &&
-        needs.setup.outputs.enable_build_jobs == 'true'
+        needs.setup.outputs.enable_build_jobs == 'true' &&
+        !(
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.fork == false &&
+          matrix.variant.family == 'gfx94X-dcgpu'
+        )
       }}
     strategy:
       fail-fast: false
@@ -132,40 +137,30 @@ jobs:
       contents: read
       id-token: write
 
-  # Automatically build a small PyTorch wheel matrix from the PR head SHA when rocm-libraries is bumped.
-  dev_release_on_rocm_libraries_bump:
+  # Automatically build ROCm packages and PyTorch wheels for pull requests.
+  # This triggers the full release workflow which will:
+  # 1. Build ROCm C++ artifacts and Python packages for gfx94X-dcgpu
+  # 2. Upload packages to S3 with proper versioning
+  # 3. Automatically trigger PyTorch wheel builds with the correct rocm_version
+  # Note: Only runs for non-forked PRs to ensure AWS credentials are available
+  dev_release_for_pr:
     needs: [setup]
     if: >-
       ${{
         github.event_name == 'pull_request' &&
-        needs.setup.outputs.rocm_libraries_bump == 'true' &&
         github.event.pull_request.head.repo.fork == false
       }}
+    uses: ./.github/workflows/release_portable_linux_packages.yml
+    secrets: inherit
     permissions:
       contents: read
       id-token: write
-    strategy:
-      fail-fast: false
-      matrix:
-        python_version: ["3.12"]
-        pytorch_git_ref: ["release/2.8", "nightly"]
-        include:
-          - pytorch_git_ref: release/2.8
-            pytorch_patchset: rocm_2.8
-          - pytorch_git_ref: nightly
-            pytorch_patchset: nightly
-    uses: ./.github/workflows/build_portable_linux_pytorch_wheels.yml
-    secrets: inherit
+      actions: write
     with:
-      amdgpu_family: gfx94X-dcgpu
-      python_version: ${{ matrix.python_version }}
       release_type: dev
       s3_subdir: v2
       s3_staging_subdir: v2-staging
-      cloudfront_url: https://rocm.devreleases.amd.com/v2
-      cloudfront_staging_url: https://rocm.devreleases.amd.com/v2-staging
-      pytorch_git_ref: ${{ matrix.pytorch_git_ref }}
-      pytorch_patchset: ${{ matrix.pytorch_patchset }}
+      families: gfx94X-dcgpu
       ref: ${{ github.event.pull_request.head.sha }}
 
   # build_python_packages:
@@ -177,7 +172,7 @@ jobs:
     if: always()
     needs:
       - setup
-      - dev_release_on_rocm_libraries_bump
+      - dev_release_for_pr
       - linux_build_and_test
       - windows_build_and_test
     runs-on: ubuntu-24.04
