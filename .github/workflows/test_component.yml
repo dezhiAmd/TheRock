@@ -106,6 +106,25 @@ jobs:
         run: |
           python ./build_tools/print_driver_gpu_info.py
 
+      - name: Start GPU memory monitoring
+        id: gpu_monitor
+        run: |
+          # Start GPU memory monitor in background
+          GPU_LOG_DIR="${{ github.workspace }}/gpu_memory_logs"
+          mkdir -p "$GPU_LOG_DIR"
+          
+          python ./build_tools/monitor_gpu_memory.py \
+            --output-dir "$GPU_LOG_DIR" \
+            --interval 5 &
+          
+          MONITOR_PID=$!
+          echo "monitor_pid=$MONITOR_PID" >> $GITHUB_OUTPUT
+          echo "gpu_log_dir=$GPU_LOG_DIR" >> $GITHUB_OUTPUT
+          echo "Started GPU memory monitoring (PID: $MONITOR_PID)"
+          
+          # Give monitor time to initialize
+          sleep 2
+
       - name: Test
         timeout-minutes: ${{ fromJSON(inputs.component).timeout_minutes }}
         env:
@@ -114,6 +133,39 @@ jobs:
           TEST_TYPE: ${{ fromJSON(inputs.component).test_type }}
         run: |
           ${{ fromJSON(inputs.component).test_script }}
+
+      - name: Stop GPU memory monitoring
+        if: always()
+        run: |
+          # Stop the GPU monitor process
+          MONITOR_PID="${{ steps.gpu_monitor.outputs.monitor_pid }}"
+          if [ -n "$MONITOR_PID" ] && kill -0 "$MONITOR_PID" 2>/dev/null; then
+            echo "Stopping GPU memory monitor (PID: $MONITOR_PID)"
+            kill -TERM "$MONITOR_PID" || true
+            # Wait for graceful shutdown
+            sleep 3
+            # Force kill if still running
+            kill -9 "$MONITOR_PID" 2>/dev/null || true
+          else
+            echo "GPU monitor process not running"
+          fi
+          
+          # Display summary if available
+          GPU_LOG_DIR="${{ steps.gpu_monitor.outputs.gpu_log_dir }}"
+          if [ -f "$GPU_LOG_DIR/gpu_memory_summary.log" ]; then
+            echo "=== GPU Memory Monitoring Summary ==="
+            cat "$GPU_LOG_DIR/gpu_memory_summary.log"
+            echo "====================================="
+          fi
+
+      - name: Upload GPU memory logs
+        if: always()
+        uses: actions/upload-artifact@6f51ac03b9356f520e9adb1b1b7802705f340c2b # v4.5.0
+        with:
+          name: gpu-memory-logs-${{ inputs.component }}-shard-${{ matrix.shard }}
+          path: ${{ steps.gpu_monitor.outputs.gpu_log_dir }}
+          retention-days: 7
+          if-no-files-found: warn
 
       # GitHub's 'Complete job' step is unaware of launched executables
       # and will fail to clean up orphan processes.
