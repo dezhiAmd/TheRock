@@ -33,37 +33,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
 
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python < 3.11
+    tomllib = None
+
 # =============================================================================
 # Configuration
 # =============================================================================
 
-# Build name -> Display name mapping
-NAME_MAPPING = {
+# Legacy aliases for historical directory names that don't match artifacts
+LEGACY_NAME_ALIASES = {
     "clr": "core-hip",
     "ocl-clr": "core-ocl",
-    "ROCR-Runtime": "core-runtime",
-    "blas": "rocBLAS",
-    "prim": "rocPRIM",
-    "fft": "rocFFT",
-    "rand": "rocRAND",
-    "miopen": "MIOpen",
-    "hipdnn": "hipDNN",
-    "composable-kernel": "composable_kernel",
-    "support": "mxDataGenerator",
-    "host-suite-sparse": "SuiteSparse",
-    "rocwmma": "rocWMMA",
-    "miopen-plugin": "miopen_plugin",
-}
-
-# Top-level directories for ROCm components
-ROCM_COMPONENT_DIRS = {
-    "base",
-    "compiler",
-    "core",
-    "comm-libs",
-    "dctools",
-    "profiler",
-    "ml-libs",
+    "rocr-runtime": "core-runtime",
 }
 
 # Regex to parse artifact filenames: <project>_<variant>[_suffix].tar.xz
@@ -80,6 +63,7 @@ PHASE_RULES = [
     (lambda p: p.endswith("/stamp/build.stamp"), "Build"),
     (lambda p: p.endswith("/stamp/stage.stamp"), "Install"),
     (lambda p: p.startswith("artifacts/") and p.endswith(".tar.xz"), "Package"),
+    (lambda p: "sources_fetch" in p, "Download"),
     (lambda p: "download" in p and "stamp" in p, "Download"),
     (lambda p: "update" in p and "stamp" in p, "Update"),
 ]
@@ -102,6 +86,75 @@ class Task:
     @property
     def duration(self) -> int:
         return self.end - self.start
+
+
+# =============================================================================
+# Topology / Naming Helpers
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class TopologyInfo:
+    artifact_names: set[str]
+    artifact_groups: set[str]
+
+
+def load_build_topology(topology_path: Path) -> TopologyInfo:
+    """Load BUILD_TOPOLOGY.toml to learn artifact and group names."""
+    if not topology_path.exists() or tomllib is None:
+        return TopologyInfo(artifact_names=set(), artifact_groups=set())
+
+    try:
+        data = tomllib.loads(topology_path.read_text())
+    except Exception:
+        return TopologyInfo(artifact_names=set(), artifact_groups=set())
+
+    artifacts = data.get("artifacts", {})
+    groups = data.get("artifact_groups", {})
+    return TopologyInfo(
+        artifact_names=set(artifacts.keys()),
+        artifact_groups=set(groups.keys()),
+    )
+
+
+def normalize_name(raw_name: str) -> str:
+    """Normalize project names for matching against topology entries."""
+    return raw_name.replace("_", "-").lower()
+
+
+def canonicalize_name(raw_name: str, topology: TopologyInfo) -> str:
+    """Map a raw project name to a stable canonical name."""
+    if not raw_name:
+        return raw_name
+    normalized = normalize_name(raw_name)
+
+    if normalized in LEGACY_NAME_ALIASES:
+        return LEGACY_NAME_ALIASES[normalized]
+
+    if normalized in topology.artifact_names or normalized in topology.artifact_groups:
+        return normalized
+
+    for prefix in ("roc", "hip"):
+        if normalized.startswith(prefix):
+            candidate = normalized[len(prefix) :]
+            if candidate in topology.artifact_names:
+                return candidate
+
+    return raw_name
+
+
+def normalize_output_path(output: str, build_dir: Path) -> str:
+    """Normalize Ninja log output paths to avoid double counting."""
+    output = output.replace("\\", "/")
+    build_prefix = str(build_dir.resolve()).replace("\\", "/").rstrip("/")
+    if output.startswith(build_prefix + "/"):
+        return output[len(build_prefix) + 1 :]
+
+    is_abs_like = output.startswith("/") or re.match(r"^[A-Za-z]:/", output)
+    if is_abs_like and "/build/" in output:
+        return output.split("/build/", 1)[1]
+
+    return output.lstrip("./")
 
 
 # =============================================================================
@@ -145,6 +198,7 @@ def extract_name_from_artifact(filename: str) -> Optional[str]:
 
 def parse_output_path(
     output_path: str,
+    topology: TopologyInfo,
 ) -> tuple[Optional[str], Optional[str], Optional[str]]:
     """Extract (name, category, phase) from output path."""
     phase = get_phase(output_path)
@@ -159,12 +213,13 @@ def parse_output_path(
         name = extract_name_from_artifact(parts[1])
         if not name:
             return None, None, None
+        name = canonicalize_name(name, topology)
         category = (
             CATEGORY_DEP
             if ("sysdeps" in name or "fftw3" in name or name.startswith("host-"))
             else CATEGORY_ROCM
         )
-        return NAME_MAPPING.get(name, name), category, phase
+        return name, category, phase
 
     # Third-party dependencies
     if top_dir == "third-party":
@@ -176,20 +231,18 @@ def parse_output_path(
             return None, None, None
         if name == "sysdeps":
             return None, None, None
-        return NAME_MAPPING.get(name, name), CATEGORY_DEP, phase
+        return canonicalize_name(name, topology), CATEGORY_DEP, phase
 
     # ROCm components in standard directories
-    if top_dir in ROCM_COMPONENT_DIRS:
-        name = parts[1] if len(parts) > 1 else None
-        if not name:
-            return None, None, None
-        return NAME_MAPPING.get(name, name), CATEGORY_ROCM, phase
+    name = parts[1] if len(parts) > 1 else None
+    if top_dir not in ("math-libs", "rocm-libraries", "rocm-systems") and name:
+        return canonicalize_name(name, topology), CATEGORY_ROCM, phase
 
     # rocm-libraries / rocm-systems
     if top_dir in ("rocm-libraries", "rocm-systems"):
         if len(parts) > 2 and parts[1] == "projects":
             name = parts[2]
-            return NAME_MAPPING.get(name, name), CATEGORY_ROCM, phase
+            return canonicalize_name(name, topology), CATEGORY_ROCM, phase
         return None, None, None
 
     # math-libs (special structure)
@@ -202,7 +255,7 @@ def parse_output_path(
             name = parts[1]
         if not name:
             return None, None, None
-        return NAME_MAPPING.get(name, name), CATEGORY_ROCM, phase
+        return canonicalize_name(name, topology), CATEGORY_ROCM, phase
 
     return None, None, None
 
@@ -213,26 +266,23 @@ def parse_output_path(
 
 
 def analyze_tasks(
-    tasks: List[Task], build_dir: Path
+    tasks: List[Task], build_dir: Path, topology: TopologyInfo
 ) -> Dict[str, Dict[str, Dict[str, int]]]:
     """Aggregate task durations by category/name/phase."""
     projects: Dict[str, Dict[str, Dict[str, int]]] = defaultdict(
         lambda: defaultdict(lambda: defaultdict(int))
     )
     seen = set()
-    build_prefix = str(build_dir.resolve())
 
     for task in tasks:
-        output = task.output
-        if output.startswith(build_prefix):
-            output = output[len(build_prefix) :].lstrip("/")
+        output = normalize_output_path(task.output, build_dir)
 
         key = (output, task.start, task.end)
         if key in seen:
             continue
         seen.add(key)
 
-        name, category, phase = parse_output_path(output)
+        name, category, phase = parse_output_path(output, topology)
         if name:
             projects[category][name][phase] += task.duration
 
@@ -438,7 +488,9 @@ def main():
         sys.exit(1)
 
     tasks = parse_ninja_log(ninja_log)
-    projects = analyze_tasks(tasks, args.build_dir)
+    topology_path = Path(__file__).resolve().parents[1] / "BUILD_TOPOLOGY.toml"
+    topology = load_build_topology(topology_path)
+    projects = analyze_tasks(tasks, args.build_dir, topology)
 
     output_file = args.output or args.build_dir / "logs" / "build_time_analysis.html"
     output_file.parent.mkdir(parents=True, exist_ok=True)
